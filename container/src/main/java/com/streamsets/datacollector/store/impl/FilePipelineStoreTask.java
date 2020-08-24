@@ -78,6 +78,8 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.io.File;
+
 
 public class FilePipelineStoreTask extends AbstractTask implements PipelineStoreTask {
   private static final Logger LOG = LoggerFactory.getLogger(FilePipelineStoreTask.class);
@@ -254,9 +256,47 @@ public class FilePipelineStoreTask extends AbstractTask implements PipelineStore
     }
   }
 
-  private boolean cleanUp(String name) {
+  private boolean cleanUp(String name) throws IOException {
+
     boolean deleted = PipelineDirectoryUtil.deleteAll(getPipelineDir(name).toFile());
-    deleted &= PipelineDirectoryUtil.deletePipelineDir(runtimeInfo, name);
+    boolean runInfoDeleted = PipelineDirectoryUtil.deletePipelineDir(runtimeInfo, name);
+    
+
+    //create the path to the pipeline's runInfo
+    File pathToPipeline = new File(runtimeInfo.getDataDir() + "/runInfo/" + name+"/0/");
+
+
+    //If runInfo returns false, i.e. some files(pipelineStateHistory.json) in runInfo didn't get delete.
+    if (!runInfoDeleted) {
+      
+      //reading files from that directory
+      File[] files = pathToPipeline.listFiles();
+
+
+      // if any file found inside the runInfo directory
+      if (files.length > 0) {
+        LOG.info("Some files in runInfo could not be deleted. Checking if NFS file system is used");
+        runInfoDeleted = true;
+        
+        for(File file: files) {
+          String fileName = file.getName();
+
+          //we check the presence of those files, whose name begins with '.nfs',
+          //if such file exists, then we assume the presence of NFS filesystem and do not attempt to delete them.          
+          if(!fileName.beginsWith(".nfs")) {
+            
+            runInfoDeleted = false;
+            LOG.error("There are more files present, except .nfs files.");
+            break;
+          } 
+        }   
+      } else {
+        LOG.error("Some exception occurred, Please go through the logs.");
+      }
+
+    }
+    
+    deleted &= runInfoDeleted;
     if(deleted) {
       LogUtil.resetRollingFileAppender(name, "0", STATE);
     }
@@ -277,9 +317,15 @@ public class FilePipelineStoreTask extends AbstractTask implements PipelineStore
           throw new PipelineStoreException(ContainerError.CONTAINER_0208, pipelineStatus);
         }
         Map<String, String> offset = OffsetFileUtil.getOffsets(runtimeInfo, name, REV);
-        if (!cleanUp(name)) {
+
+        //added try catch
+        try {
+          if (!cleanUp(name)) {
           throw new PipelineStoreException(ContainerError.CONTAINER_0203, name);
         }
+      }catch(IOException e) {
+        LOG.error("Error in opening pipeline runInfo directory.");
+      }
         PipelineState latestState = new PipelineStateImpl(
             currentState.getUser(),
             currentState.getPipelineId(),
